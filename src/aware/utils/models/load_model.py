@@ -30,7 +30,13 @@ def load(name: str = "AWARE"):
         return
     
     verbose = config.get("verbose", True)
-    
+
+    # Per-rate STFT sizes are scaled from frame_length, the mel filter bank from n_fft: they must agree
+    net_n_fft = config.get("detection_net_cfg", {}).get("n_fft", 1024)
+    if net_n_fft != config.get("frame_length", 1024):
+        raise ValueError(f"detection_net_cfg.n_fft ({net_n_fft}) must equal frame_length ({config.get('frame_length', 1024)}) "
+                         f"in {CONFIGS[name]}")
+
     if verbose:
         logger.info("Config loaded successfully")
         logger.info("Creating embedder...")

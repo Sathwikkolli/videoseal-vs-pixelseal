@@ -5,7 +5,7 @@ import numpy as np
 
 class BaseDetectorNet(nn.Module):
     @abstractmethod
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, sample_rate: int = None) -> torch.Tensor:
         pass
 
 class BaseDetector(ABC):    

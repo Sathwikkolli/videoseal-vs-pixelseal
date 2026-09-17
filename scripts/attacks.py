@@ -247,7 +247,7 @@ class Resample(Attack):
         self.name = f"resample_{target_sr}"
     
     def apply(self, audio, sr):
-        """Resample audio to target rate and back using linear interpolation
+        """Resample audio from sr to target rate and back (polyphase, or decimation + linear interpolation)
         
         Args:
             audio: Input audio (float32, range -1 to 1)
@@ -270,7 +270,7 @@ class Resample(Attack):
         
         else:
             from scipy.signal import resample_poly
-            up, down = self.target_sr, 16000
+            up, down = self.target_sr, sr
             audio_ = resample_poly(audio, up, down)
             audio_ = resample_poly(audio_, down, up)
             return audio_
@@ -318,12 +318,14 @@ class RandomBandstop(Attack):
         if audio_np.ndim != 1:
             raise ValueError("RandomBandstop currently supports 1D audio arrays only.")
 
-        # Choose random low cutoff in [50, 4000 - band_width]
-        f_low = random.uniform(self.min_freq, self.max_freq - self.band_width)
-        f_high = f_low + self.band_width
-
         # Normalize frequencies to Nyquist (half the sampling rate)
         nyq = sr / 2.0
+
+        # Choose random low cutoff in [min_freq, max_freq - band_width], max_freq kept below Nyquist (e.g. 8 kHz audio)
+        max_freq = min(self.max_freq, 0.95 * nyq)
+        f_low = random.uniform(self.min_freq, max_freq - self.band_width)
+        f_high = f_low + self.band_width
+
         low = f_low / nyq
         high = f_high / nyq
 
@@ -389,9 +391,10 @@ class LowPassFilter(Attack):
 
         
         nyquist = 0.5 * sr
-        normalized_cutoff = self.cut_off / nyquist
+        # Cut-off must stay below Nyquist (4 kHz cut-off is invalid at 8 kHz)
+        normalized_cutoff = min(self.cut_off, 0.95 * nyquist) / nyquist
 
-    
+
         b, a = butter(self.order, normalized_cutoff, btype='low', analog=False)
         filtered_signal = lfilter(b, a, audio)
         

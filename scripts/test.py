@@ -1,3 +1,4 @@
+import argparse
 import numpy as np
 import librosa
 from pathlib import Path
@@ -10,20 +11,31 @@ from aware.metrics.audio import PESQ, BER, STOI
 import logging
 logger.setLevel(logging.DEBUG)
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="AWARE watermark test pipeline")
+    parser.add_argument("--audio-dir", type=Path, default=Path(__file__).parent.parent / "libri",
+                        help="folder with test audio files (default: <repo>/libri)")
+    parser.add_argument("--model", default="AWARE", choices=["AWARE", "AWARE(20bps)"],
+                        help="model to test (AWARE(20bps) supports 16000Hz only)")
+    parser.add_argument("--sample-rate", type=int, default=None,
+                        help="resample every file to this rate before embedding (default: keep each file's native rate)")
+    return parser.parse_args()
+
+
 def main():
-    attack_list = [ NoAttack(), PCMBitDepthConversion(8),  
-                    MP3Compression(9), MP3Compression(0), 
+    args = parse_args()
+
+    attack_list = [ NoAttack(), PCMBitDepthConversion(8),
+                    MP3Compression(9), MP3Compression(0),
                     DeleteSamples(0.5), TimeStretch(0.7),TimeStretch(1.5), PitchShift(cents=10),
-                    Resample(), RandomBandstop(), LowPassFilter() , HighPassFilter()] 
+                    Resample(), RandomBandstop(), LowPassFilter() , HighPassFilter()]
 
     print("Watermark Test Pipeline")
     print("=" * 50)
-    
+
     # Paths
-    script_dir = Path(__file__).parent
-    project_root = script_dir.parent
-    audio_folder_path = project_root / "libri"
-    
+    audio_folder_path = args.audio_dir
+
 
     # Check if audio file exists
     if not audio_folder_path.exists():
@@ -32,7 +44,7 @@ def main():
         return
     
     
-    embedder, detector = load()
+    embedder, detector = load(args.model)
 
     watermark_length = 20
 
@@ -48,19 +60,16 @@ def main():
     for audio_file_path in input_dir.glob('*.*'):
         audio, sr = librosa.load(str(audio_file_path), sr=None, mono=True)
         
-        logger.info("Processing " + audio_file_path.name)
-
         watermark_bits = np.random.randint(0, 2, size=watermark_length, dtype=np.int32)
-        
-        
-        if sr != 16000:
+
+        # The watermark is embedded at the file's own rate, resample only if a test rate was requested
+        if args.sample_rate is not None and sr != args.sample_rate:
             from scipy.signal import resample_poly
-            up, down = 16000, sr
-            audio = resample_poly(audio, up, down)
+            audio = resample_poly(audio, args.sample_rate, sr)
+            sr = args.sample_rate
 
-        sr=16000
+        logger.info(f"Processing {audio_file_path.name} at {sr}Hz")
 
-        
         try:
             watermarked_audio = embed_watermark(audio, sample_rate=sr, watermark_bits = watermark_bits, model = embedder)
         except ValueError as e:

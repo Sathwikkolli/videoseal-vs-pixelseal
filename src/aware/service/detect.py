@@ -3,6 +3,7 @@ from aware.detection.multibit_detector import AWAREDetector
 from aware.utils.watermark import PatternDecoder
 from aware.utils.logger import logger
 from aware.utils.utils import BRH_activation_to_probability
+from aware.service.embed import check_sample_rate
 
 
 def detect_watermark(audio: np.ndarray, sample_rate: int, detector: AWAREDetector):
@@ -11,15 +12,14 @@ def detect_watermark(audio: np.ndarray, sample_rate: int, detector: AWAREDetecto
 
     Args:
         audio (np.ndarray): The audio data.
-        sample_rate (int): Sampling rate of the audio.
+        sample_rate (int): Sampling rate of the audio as it is now (it may differ from the rate used for embedding).
+            The default AWARE model supports 8000-48000Hz, AWARE(20bps) supports 16000Hz only.
     Returns:
         watermark bits
     """
+    sample_rate = check_sample_rate(sample_rate, detector.mode_name, detector.base_sample_rate, detector.embedding_bands)
+
     pattern_postprocess_pipeline = [PatternDecoder(encoder_mode=detector.pattern_mode, threshold=detector.threshold)]
-    
-    if sample_rate != 16000:
-        logger.error(f"Invalid sample rate. Expected 16000Hz, got {sample_rate}Hz.")
-        raise ValueError("Invalid sample rate. Expected 16000Hz.")
 
     if audio.ndim != 1:
         logger.error(f"Invalid audio shape. Expected mono (1D) signal, got shape {audio.shape}.")

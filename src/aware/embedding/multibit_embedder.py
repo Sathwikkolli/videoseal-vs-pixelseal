@@ -9,15 +9,21 @@ from aware.detection import AWAREDetectorNet
 from aware.embedding.optimizers import get_optimizer
 from aware.embedding.schedulers import get_scheduler
 from aware.embedding.losses import get_loss_fn
-from aware.utils.audio import WaveformNormalizer, STFT, STFTDecomposer, STFTAssembler, ISTFT
-from aware.utils.watermark import * 
+from aware.utils.audio import WaveformNormalizer, STFT, STFTDecomposer, STFTAssembler, ISTFT, RateParams, get_rate_params
+from aware.utils.watermark import *
 from aware.utils.logger import logger
 from aware.utils.utils import to_tensor
 
 class AWAREEmbedder(BaseEmbedder):
+    """
+    `frame_length`, `hop_length` and `win_length` are the base values for `detection_net_cfg['sample_rate']`
+    (16 kHz by default). For other sample rates they are scaled by `get_rate_params`.
+    """
     def __init__(self, frame_length: int = 1024, hop_length: int = 256, window: str = "hann", win_length: int = 1024, pattern_mode: str = "bits2bipolar", embedding_bands: tuple[int, int] = (500, 4000), tolerance_db: float = 6.0, num_iterations: int = 400, detection_net_cfg: dict = None, optimizer_cfg: dict = None, scheduler_cfg: dict = None, loss:str = "push", verbose: bool = True, mode_name:str = "full_length"):
         self.frame_length = frame_length
         self.hop_length = hop_length
+        self.window = window
+        self.win_length = win_length
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.embedding_bands = embedding_bands
         self.tolerance_db = tolerance_db
@@ -27,7 +33,8 @@ class AWAREEmbedder(BaseEmbedder):
         
         self.detection_net = AWAREDetectorNet(**detection_net_cfg)
         self.detection_net.eval().to(self.device) # Keep detection network in eval mode (frozen), but allow gradients to flow through
-        
+        self.base_sample_rate = self.detection_net.sample_rate
+
 
         self.optimizer_name = optimizer_cfg['name']
         self.optimizer_params = optimizer_cfg['params']
@@ -38,18 +45,28 @@ class AWAREEmbedder(BaseEmbedder):
         self.verbose = verbose
         self.mode_name = mode_name
         
+        # Base-rate pipelines, per-rate pipelines are built in `_get_pipelines`
         self.audio_preprocess_pipeline = [WaveformNormalizer(), STFT(frame_length, hop_length, window, win_length), STFTDecomposer()]
         self.audio_postprocess_pipeline = [STFTAssembler(), ISTFT(frame_length, hop_length, window, win_length), WaveformNormalizer()]
-        
-    def _get_embedding_frequency_indices(self, sampling_rate: int, frame_length: int) -> np.ndarray:    
-        """Get frequency indices for watermark embedding"""
-        freqs = librosa.fft_frequencies(sr=sampling_rate, n_fft=frame_length)
-        mask = (freqs >= self.embedding_bands[0]) & (freqs <= self.embedding_bands[1])
-        return np.where(mask)[0], np.where(~mask)[0] 
+        self._rate_pipelines = {self.base_sample_rate: (self.audio_preprocess_pipeline, self.audio_postprocess_pipeline)}
 
-    def _recompute_watermarked_magnitude(self, watermarked_magnitude, stft_phase):
+    def get_rate_params(self, sample_rate: int) -> RateParams:
+        """STFT parameters and embedding band indices for `sample_rate`"""
+        return get_rate_params(sample_rate, self.base_sample_rate, self.frame_length, self.hop_length,
+                               self.win_length, self.embedding_bands)
+
+    def _get_pipelines(self, params: RateParams) -> tuple[list, list]:
+        pipelines = self._rate_pipelines.get(params.sample_rate)
+        if pipelines is None:
+            stft_args = (params.frame_length, params.hop_length, self.window, params.win_length)
+            pipelines = ([WaveformNormalizer(), STFT(*stft_args), STFTDecomposer()],
+                         [STFTAssembler(), ISTFT(*stft_args), WaveformNormalizer()])
+            self._rate_pipelines[params.sample_rate] = pipelines
+        return pipelines
+
+    def _recompute_watermarked_magnitude(self, watermarked_magnitude, stft_phase, preprocess_pipeline, postprocess_pipeline):
         y = (watermarked_magnitude, stft_phase)
-        for processor in self.audio_postprocess_pipeline:
+        for processor in postprocess_pipeline:
             if isinstance(y, tuple) and len(y) == 2:
                 # For processors that take two arguments (like STFTAssembler)
                 y = processor(*y)
@@ -61,16 +78,16 @@ class AWAREEmbedder(BaseEmbedder):
         watermarked_audio = y
         
         x = watermarked_audio
-        for processor in self.audio_preprocess_pipeline:
+        for processor in preprocess_pipeline:
             x = processor(x)
         magnitude, _ = x
 
         return magnitude
 
 
-    def _optimize(self, initial_coeffs: torch.Tensor, stft_magnitude: torch.Tensor, watermark_pattern: torch.Tensor, 
-                           freq_indices: np.ndarray, not_freq_indices: np.ndarray, bounds: tuple[float, float], 
-                           stft_phase: torch.Tensor) -> torch.Tensor:
+    def _optimize(self, initial_coeffs: torch.Tensor, stft_magnitude: torch.Tensor, watermark_pattern: torch.Tensor,
+                           freq_indices: np.ndarray, not_freq_indices: np.ndarray, bounds: tuple[float, float],
+                           stft_phase: torch.Tensor, sample_rate: int, preprocess_pipeline: list, postprocess_pipeline: list) -> torch.Tensor:
         """PyTorch-based aversarial optimization"""
         start_time = time.time()
 
@@ -101,11 +118,11 @@ class AWAREEmbedder(BaseEmbedder):
             coeffs_2d = coeffs.reshape(len(freq_indices), -1)
             watermarked_magnitude[freq_indices] = coeffs_2d
             # Get neural network prediction
-            watermarked_magnitude = self._recompute_watermarked_magnitude(watermarked_magnitude, stft_phase)
+            watermarked_magnitude = self._recompute_watermarked_magnitude(watermarked_magnitude, stft_phase, preprocess_pipeline, postprocess_pipeline)
             watermarked_magnitude[not_freq_indices] = 0.0
             magnitude_tensor = watermarked_magnitude.unsqueeze(0)
-            
-            predicted_pattern= self.detection_net(magnitude_tensor).squeeze()
+
+            predicted_pattern= self.detection_net(magnitude_tensor, sample_rate).squeeze()
             
             loss = self.loss(predicted_pattern, watermark_pattern)
 
@@ -141,18 +158,26 @@ class AWAREEmbedder(BaseEmbedder):
     
     
     def embed(self, audio: np.ndarray, sample_rate: int, watermark: np.ndarray) -> np.ndarray:
+        params = self.get_rate_params(sample_rate)
+        preprocess_pipeline, postprocess_pipeline = self._get_pipelines(params)
+
         # Preprocess audio
         x = to_tensor(audio).to(self.device)
 
-        for processor in self.audio_preprocess_pipeline:
+        for processor in preprocess_pipeline:
             x = processor(x)
         magnitude, phase = x
-                
+
         watermark_pattern = to_tensor(watermark).to(self.device)
 
         # Get embedding frequency indices
-        freq_indices, not_freq_indices = self._get_embedding_frequency_indices(sample_rate, self.frame_length)
-        
+        freq_indices, not_freq_indices = params.band_indices, params.out_of_band_indices
+
+        if self.verbose:
+            logger.info(f"Sample rate {params.sample_rate}Hz: frame_length={params.frame_length}, "
+                        f"hop_length={params.hop_length}, bin width={params.bin_width:.3f}Hz, "
+                        f"{len(freq_indices)} bins in {tuple(self.embedding_bands)}Hz")
+
         watermark_coeffs = magnitude[freq_indices].flatten()
 
         # Get bounds
@@ -165,7 +190,8 @@ class AWAREEmbedder(BaseEmbedder):
             logger.info(f"Starting optimization with {len(watermark_coeffs)} variables...")
             logger.info(f"Target: {self.num_iterations} iterations")
         try:
-            watermarked_coeffs = self._optimize(watermark_coeffs, magnitude, watermark_pattern, freq_indices, not_freq_indices, bounds, phase)
+            watermarked_coeffs = self._optimize(watermark_coeffs, magnitude, watermark_pattern, freq_indices, not_freq_indices, bounds, phase,
+                                                params.sample_rate, preprocess_pipeline, postprocess_pipeline)
         except Exception as e:
             logger.error(f"Error during embedding: {e}")
             raise e
@@ -177,14 +203,17 @@ class AWAREEmbedder(BaseEmbedder):
         # Postprocess watermarked magnitude - ensure both tensors are on same device (CPU)
         phase = phase.detach().cpu() if phase.device != watermarked_magnitude.device else phase.detach()
         y = (watermarked_magnitude, phase)
-        for processor in self.audio_postprocess_pipeline:
+        for processor in postprocess_pipeline:
             if isinstance(y, tuple) and len(y) == 2:
                 # For processors that take two arguments (like STFTAssembler)
                 y = processor(*y)
+            elif isinstance(processor, ISTFT):
+                # Keep the input length, otherwise up to hop_length - 1 trailing samples are dropped
+                y = processor(y, length=len(audio))
             else:
                 # For processors that take one argument
                 y = processor(y)
-                
+
         watermarked_audio = y
         
         

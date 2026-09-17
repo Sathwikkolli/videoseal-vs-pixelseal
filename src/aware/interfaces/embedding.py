@@ -4,5 +4,5 @@ import torch
     
 class BaseEmbedder(ABC):
     @abstractmethod
-    def embed(self, audio: np.ndarray, watermark: np.ndarray) -> np.ndarray:
+    def embed(self, audio: np.ndarray, sample_rate: int, watermark: np.ndarray) -> np.ndarray:
         pass
