@@ -199,3 +199,6 @@ samples
 *.wav
 *.flac
 *.mp3
+# test outputs
+results/
+aware_sr_tests_*.log
