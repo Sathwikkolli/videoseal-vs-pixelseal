@@ -1,7 +1,7 @@
 #!/bin/bash
 # One-time setup on a Great Lakes LOGIN node (needs internet; takes ~10-15 min):
 #   bash ~/videoseal-vs-pixelseal/slurm/setup_env.sh
-# Creates the conda env on scratch (not in the home quota), installs Video Seal (pinned commit) and pre-downloads the
+# Creates the conda env, installs Video Seal (pinned commit) and pre-downloads the
 # Video Seal 1.0 and Pixel Seal checkpoints into $VSPS_CKPT so GPU jobs never download.
 set -euo pipefail
 source "$(dirname "$0")/config.sh"
@@ -13,10 +13,9 @@ if ! command -v conda >/dev/null 2>&1; then
 fi
 eval "$(conda shell.bash hook)"
 
-mkdir -p "$(dirname "$VSPS_ENV")" "$CONDA_PKGS_DIRS" "$PIP_CACHE_DIR" "$TORCH_HOME"
-if [ ! -x "$VSPS_ENV/bin/python" ]; then
+if ! conda env list | awk '{print $1}' | grep -qx "$VSPS_ENV"; then
     # ffmpeg from conda-forge is built with libx264 and libvmaf
-    conda create -y -p "$VSPS_ENV" -c conda-forge python=3.10 "ffmpeg>=6" pip
+    conda create -y -n "$VSPS_ENV" -c conda-forge python=3.10 "ffmpeg>=6" pip
 fi
 conda activate "$VSPS_ENV"
 
@@ -42,7 +41,7 @@ for name in ["videoseal", "pixelseal"]:
     m = load_model(parse_spec(name, 4), "cpu", "$VSPS_CKPT")
     print(name, "ok:", nbits_of(m), "bits")
 import lpips
-lpips.LPIPS(net="alex", verbose=False)  # caches AlexNet weights in $TORCH_HOME (scratch)
+lpips.LPIPS(net="alex", verbose=False)  # caches AlexNet weights in ~/.cache/torch
 print("lpips ok")
 EOF
 
