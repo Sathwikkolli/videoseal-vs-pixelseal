@@ -56,6 +56,23 @@ All paths default to `slurm/config.sh`:
 
 Override any of them with environment variables before running `sbatch`.
 
+### Fast path: use the released clips (no fetching or preparing)
+
+The 38 prepared clips and their manifest (tiers by measured TI) are attached to the
+[`clips-v1` release](https://github.com/Sathwikkolli/videoseal-vs-pixelseal/releases/tag/clips-v1).
+
+```bash
+git clone https://github.com/Sathwikkolli/videoseal-vs-pixelseal.git ~/videoseal-vs-pixelseal
+cd ~/videoseal-vs-pixelseal && bash slurm/setup_env.sh            # once, ~15-25 min
+source slurm/config.sh && mkdir -p "$VSPS_DATA" logs
+curl -L -o "$VSPS_DATA/vsps_clips.tar" https://github.com/Sathwikkolli/videoseal-vs-pixelseal/releases/download/clips-v1/vsps_clips.tar
+tar -xf "$VSPS_DATA/vsps_clips.tar" -C "$VSPS_DATA" --strip-components=1
+sed -i "s#,norm/#,$VSPS_DATA/norm/#" "$VSPS_DATA/manifest.csv"
+sbatch --array=0-37 slurm/run_array.sbatch                         # one GPU job per clip
+# when squeue -u $USER shows no vsps_run jobs left:
+sbatch slurm/aggregate.sbatch                                      # tables, plots, report.md, index.html
+```
+
 ```bash
 # 0. once, on a login node
 git clone https://github.com/Sathwikkolli/videoseal-vs-pixelseal.git ~/videoseal-vs-pixelseal

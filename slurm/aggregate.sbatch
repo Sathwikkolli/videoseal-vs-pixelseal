@@ -16,6 +16,6 @@ source "${VSPS_REPO:-$HOME/videoseal-vs-pixelseal}/slurm/config.sh"
 vsps_activate
 cd "$VSPS_REPO"
 
-python scripts/aggregate.py --out "$VSPS_OUT"
+python scripts/aggregate.py --out "$VSPS_OUT" --manifest "$VSPS_DATA/manifest.csv"
 python scripts/gallery.py --out "$VSPS_OUT"
 echo "viewer: $VSPS_OUT/index.html"
