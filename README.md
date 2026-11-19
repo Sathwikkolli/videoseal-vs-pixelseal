@@ -1,103 +1,135 @@
-# AWARE: Audio Watermarking via Adversarial Resistance to Edits
+# Video Seal vs Pixel Seal
 
-## Installation
+A benchmark that compares two open video watermarking models from Meta,
+[Video Seal 1.0](https://arxiv.org/abs/2412.09492) and
+[Pixel Seal](https://arxiv.org/abs/2512.16874), on videos with low, mid and high
+amounts of motion. Each video goes through three everyday attacks plus one combined
+attack. The jobs run as Slurm jobs on UMich **Great Lakes**.
+
+| Tier | Content | How clips are chosen |
+|---|---|---|
+| low | podcasts, static camera, 1–2 people talking | the 10 lowest-TI podcast clips |
+| mid | a speaker at a public gathering, a moving crowd, slow pans | the 10 gathering clips whose TI falls between the low and high tiers |
+| high | sports, concerts, dance, fireworks, handheld camera | the 10 highest-TI high-motion clips |
+
+Clips are placed in tiers by **measured motion**, not by label alone. Motion is the ITU-T
+P.910 temporal information, TI = std(Y<sub>t</sub> − Y<sub>t−1</sub>). Spatial
+information (SI, texture) is reported too.
+
+## What gets measured
+
+| | |
+|---|---|
+| Attacks (real ffmpeg) | H.264 re-encode at CRF 23 / 28 / 33 · centre crop keeping 90 / 75 / 50 % of the area · downscale to 720p / 480p / 360p · combined (crop 75 % → 480p → CRF 28) |
+| Robustness | bit accuracy, log10 p-value, detection at FPR 10⁻⁶ |
+| Negative control | decoding run on the *unwatermarked* clip (should be about 50 % bit accuracy) |
+| Quality | PSNR (all frames), SSIM and LPIPS (every 10th frame), VMAF |
+| Speed | embedding time (model forward only, and wall clock), per second of video, plus peak GPU memory |
+| Statistics | mean with 95 % bootstrap CI per tier; paired Wilcoxon test between the models on the same videos |
+
+To make the comparison fair:
+- Both models carry 256 bits.
+- Each video gets one message, shared by both models.
+- Both use the same watermark step size, `k = 4`. Pixel Seal's own default is 8; add `pixelseal@k8` to `VSPS_MODELS` to test that too.
+- All tasks run on one GPU type.
+
+## Repository layout
+
+```
+scripts/fetch_pexels.py    download candidate clips (Pexels API) + attribution CSV
+scripts/prepare.py         normalize to 1080p30, 10 s; compute SI/TI -> candidates.csv
+scripts/select_videos.py   choose 10 clips per tier by TI -> manifest.csv
+scripts/run_one.py         one clip: embed, quality, attacks, extract, viewer files -> results/<id>.json
+scripts/aggregate.py       tables, CIs, paired tests, plots, report.md
+scripts/gallery.py         index.html to watch every watermarked video
+src/vsbench/               video I/O, metrics, attacks, model wrappers
+slurm/                     config.sh, setup_env.sh, prepare / run_array / aggregate .sbatch
+tests/                     model-free unit tests
+```
+
+## Running on Great Lakes
+
+All paths default to `slurm/config.sh`:
+- account: `hafiz1`
+- data: `/scratch/hafiz1_root/hafiz1/$USER/vsps`
+- conda env: `vsps`
+
+Override any of them with environment variables before running `sbatch`.
+
 ```bash
-git clone https://github.com/deepmarkpy/aware.git
-cd ./aware
-python -m pip install -e .
+# 0. once, on a login node
+git clone https://github.com/Sathwikkolli/videoseal-vs-pixelseal.git ~/videoseal-vs-pixelseal
+bash ~/videoseal-vs-pixelseal/slurm/setup_env.sh
+
+# 1. get candidate clips (login node; free key from https://www.pexels.com/api/)
+source ~/videoseal-vs-pixelseal/slurm/config.sh && vsps_activate
+export PEXELS_API_KEY=...
+python ~/videoseal-vs-pixelseal/scripts/fetch_pexels.py --data $VSPS_DATA --per-category 30
+
+# 2. normalize, measure TI/SI, select 10 per tier (CPU job)
+cd ~/videoseal-vs-pixelseal && mkdir -p logs
+sbatch slurm/prepare.sbatch
+
+# 3. after it finishes, check the tiers, then run the 30 clips on GPUs
+column -s, -t < $VSPS_DATA/manifest.csv | cut -c1-120
+jid=$(sbatch --parsable slurm/run_array.sbatch)
+
+# 4. tables, plots and the video viewer once the array is done
+sbatch --dependency=afterany:$jid slurm/aggregate.sbatch
 ```
 
-## Basic Usage
-```python
-import numpy as np
-import librosa
-import soundfile
-from aware.utils.models import load
-from aware.service import embed_watermark, detect_watermark
-from aware.metrics.audio import BER, PESQ
+You can also put your own clips in `$VSPS_DATA/raw/{podcast,gathering,high_motion}/` before
+step 2; `prepare.py` picks up everything in those folders.
 
-# 1. load model
-# `name` selects the configuration profile:
-#   - "AWARE" (default): embedding is computed over the full sequence
-#   - "AWARE(20bps)": embedding is computed per second of audio
-embedder, detector = load(name="AWARE")
+Useful variations:
 
-# 2.create 20-bit watermark
-watermark_bits = np.random.randint(0, 2, size=20, dtype=np.int32)
-
-
-# 3.read host audio
-# "AWARE" accepts 8000-48000Hz audio at its native rate, "AWARE(20bps)" requires 16kHz.
-# Keep the file's own rate with sr=None:
-signal, sample_rate = librosa.load("example.wav", sr=None, mono=True)
-
-
-# 4.embed watermark
-watermarked_signal = embed_watermark(signal, sample_rate, watermark_bits, embedder)
-# you can save it as a new one:
-# soundfile.write("output.wav", watermarked_signal, sample_rate)
-
-
-# 5. detect watermark
-# Detect the watermark from the audio. The function returns:
-#   - detected_pattern: the recovered watermark bits
-#   - confidence: a value in [0, 1] representing the estimated probability;
-#                 that the signal contains a watermark.
-# If confidence >= tau (default tau = 0.5), the signal is considered watermarked;
-# otherwise, it is treated as unwatermarked.
-detected_pattern, confidence = detect_watermark(watermarked_signal, sample_rate, detector)
-
-
-# 6.check accuracy and perceptual quality
-ber_metric = BER()
-ber = ber_metric(watermark_bits, detected_pattern)
-print(f"BER: {ber:.2f}")
-
-pesq_metric = PESQ()
-pesq = pesq_metric(watermarked_signal, signal, sample_rate)
-print(f"PESQ: {pesq:.2f}")
+```bash
+VSPS_MODELS="videoseal pixelseal pixelseal@k8" sbatch slurm/run_array.sbatch   # also Pixel Seal at its default k=8
+sbatch --partition=spgpu slurm/run_array.sbatch                                # A40s instead of V100s
+sbatch --array=7 slurm/run_array.sbatch                                         # rerun one clip
 ```
 
-## Sample rates
+## Watching the watermarked videos
 
-The default `AWARE` model embeds and detects at the audio's own sample rate, from 8 kHz to 48 kHz, without resampling it.
-AWARE was designed at 16 kHz, so the STFT is scaled with the sample rate so that every rate looks the same to the detector:
+Each clip gets a folder `$VSPS_OUT/videos/<id>/` containing:
 
-| | formula | 16 kHz | 22.05 kHz | 44.1 kHz | 48 kHz |
-|---|---|---|---|---|---|
-| frame / window length | even(1024 · sr / 16000) | 1024 | 1412 | 2822 | 3072 |
-| hop length | round(256 · sr / 16000) | 256 | 353 | 706 | 768 |
-| bin width | sr / frame length | 15.63 Hz | 15.62 Hz | 15.63 Hz | 15.63 Hz |
+- `original.mp4`
+- `side_by_side.mp4`: original | Video Seal | Pixel Seal
+- `<model>/watermarked.mp4`
+- `<model>/diff_x20.mp4`: |watermarked − original| × 20, which shows where the watermark is
+- `<model>/frame_*.png`: the middle frame as original, watermarked and difference
 
-The mel filter bank of the detector always covers 0-8000 Hz (`fmax` in `config_full_length.yaml`), and the watermark is
-embedded in the same 1000-4000 Hz band at every rate. Content above 8 kHz is not modified.
+`$VSPS_OUT/index.html` puts all of them on one page, together with each clip's scores.
 
-- Detection uses the rate the audio has *now*: a file watermarked at 44.1 kHz and later converted to 16 kHz is detected with `sample_rate=16000`.
-- Rates that are simple multiples of 16 kHz (8k, 12k, 24k, 32k, 48k) match the 16 kHz detector exactly, the 44.1 kHz family matches up to rounding (~0.06 %).
-- At 8 kHz the 4 kHz band edge equals Nyquist, a warning is logged and robustness may be lower.
-- The speech check (WebRTC VAD) only supports 8/16/32/48 kHz; for other rates it runs on a temporary 16 kHz copy.
-- `AWARE(20bps)` still requires 16 kHz.
+There are three ways to open it:
 
-Check a setup with `python scripts/check_sample_rates.py --audio speech.wav`, or evaluate attacks at a given rate with
-`python scripts/test.py --audio-dir libri --sample-rate 44100`.
+1. **Open OnDemand → Jupyter** (easiest; videos play in your own browser). Before starting
+   the session, run `ln -s $VSPS_OUT ~/vsps_out` once on a login node. Then start a Jupyter
+   session at https://greatlakes.arc-ts.umich.edu, browse to `vsps_out/`, right-click
+   `index.html` and choose **Open in New Browser Tab**.
+2. **Copy the files to your laptop.** The preview videos are small.
 
-## License
+   ```bash
+   rsync -av --exclude 'attacked_*' <uniqname>@greatlakes-xfer.arc-ts.umich.edu:/scratch/hafiz1_root/hafiz1/<uniqname>/vsps/out/ ./vsps_out/
+   ```
 
-This project is licensed under the terms of the MIT license.
+   Then open `vsps_out/index.html`.
+3. **Open OnDemand → Remote Desktop.** Open the `.mp4` files directly in a video player there.
 
-## Citation
-If you find this repository useful, we’d greatly appreciate it if you could give it a star ⭐.
+The preview files are re-encoded at CRF 18 so browsers can play them. All metrics are
+computed on lossless copies, not on these previews.
 
-Please cite our work if you use it in your research.
+## Local test
 
+```bash
+python -m unittest discover -s tests -v
 ```
-@article{pavlović2025aware,
-      title={AWARE: Audio Watermarking with Adversarial Resistance to Edits}, 
-      author={Kosta Pavlović and Lazar Stanarević and Petar Nedić and Slavko Kovačević and Igor Djurović},
-      year={2025},
-      eprint={2510.17512},
-      archivePrefix={arXiv},
-      primaryClass={cs.SD},
-      url={https://arxiv.org/abs/2510.17512}, 
-}
-```
+
+The unit tests need ffmpeg but no models or GPU.
+
+## Notes
+
+- Clips come from [Pexels](https://www.pexels.com/license/) (free to use). Authors and
+  page URLs are recorded in `raw/sources.csv` and copied into `manifest.csv`.
+- SA-V is deliberately not used, because Video Seal was trained on it.
+- Video Seal is pinned to commit `f12875a` (see `slurm/setup_env.sh`).

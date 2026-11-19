@@ -1,0 +1,10 @@
+# Installed on top of torch + videoseal (see slurm/setup_env.sh)
+numpy
+pandas
+scipy
+requests
+pillow
+pytorch_msssim
+lpips
+matplotlib
+tabulate
