@@ -10,7 +10,7 @@
 #SBATCH --output=%x_%j.log
 
 # Normalize raw clips to 1080p30 10 s, measure SI/TI, pick 10 clips per motion tier.
-# Run after scripts/fetch_pexels.py. Submit:  sbatch ~/videoseal-vs-pixelseal/slurm/prepare.sbatch
+# Run after scripts/fetch_videos.py. Submit:  sbatch ~/videoseal-vs-pixelseal/slurm/prepare.sbatch
 set -euo pipefail
 source "${VSPS_REPO:-$HOME/videoseal-vs-pixelseal}/slurm/config.sh"
 vsps_activate

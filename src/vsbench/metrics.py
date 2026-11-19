@@ -29,7 +29,7 @@ def _sobel_mag(y: np.ndarray) -> np.ndarray:
     return np.sqrt(gx * gx + gy * gy)
 
 
-def si_ti(path: str | Path, max_frames: int | None = None, batch: int = 16) -> dict:
+def si_ti(path: str | Path, max_frames: int | None = None, batch: int = 4) -> dict:
     """ITU-T P.910 spatial (SI) and temporal (TI) information, plus their means.
 
     SI = max_t std(Sobel(Y_t)),  TI = max_t std(Y_t - Y_{t-1}).
@@ -39,12 +39,12 @@ def si_ti(path: str | Path, max_frames: int | None = None, batch: int = 16) -> d
     si_vals, ti_vals = [], []
     prev = None
     for frames in iter_frames(path, batch=batch, max_frames=max_frames):
-        y = _luma(frames)
-        si_vals.extend(_sobel_mag(y).reshape(len(y), -1).std(axis=1).tolist())
-        seq = y if prev is None else np.concatenate([prev[None], y], axis=0)
-        if len(seq) > 1:
-            ti_vals.extend(np.diff(seq, axis=0).reshape(len(seq) - 1, -1).std(axis=1).tolist())
-        prev = y[-1]
+        for frame in frames:  # one frame at a time keeps memory at ~100 MB for 1080p
+            y = _luma(frame[None])
+            si_vals.append(float(_sobel_mag(y).std()))
+            if prev is not None:
+                ti_vals.append(float((y[0] - prev).std()))
+            prev = y[0]
     return {
         "si": float(max(si_vals)) if si_vals else float("nan"),
         "ti": float(max(ti_vals)) if ti_vals else float("nan"),

@@ -36,8 +36,8 @@ To make the comparison fair:
 ## Repository layout
 
 ```
-scripts/fetch_pexels.py    download candidate clips (Pexels API) + attribution CSV
-scripts/prepare.py         normalize to 1080p30, 10 s; compute SI/TI -> candidates.csv
+scripts/fetch_videos.py    download candidate clips (Wikimedia Commons / Pixabay / Pexels) + attribution CSV
+scripts/prepare.py         normalize to 1080p30, 10 s; compute SI/TI -> candidates.csv + candidates.html
 scripts/select_videos.py   choose 10 clips per tier by TI -> manifest.csv
 scripts/run_one.py         one clip: embed, quality, attacks, extract, viewer files -> results/<id>.json
 scripts/aggregate.py       tables, CIs, paired tests, plots, report.md
@@ -61,17 +61,21 @@ Override any of them with environment variables before running `sbatch`.
 git clone https://github.com/Sathwikkolli/videoseal-vs-pixelseal.git ~/videoseal-vs-pixelseal
 bash ~/videoseal-vs-pixelseal/slurm/setup_env.sh
 
-# 1. get candidate clips (login node; free key from https://www.pexels.com/api/)
+# 1. get candidate clips (login node). Wikimedia Commons needs no key:
 source ~/videoseal-vs-pixelseal/slurm/config.sh && vsps_activate
-export PEXELS_API_KEY=...
-python ~/videoseal-vs-pixelseal/scripts/fetch_pexels.py --data $VSPS_DATA --per-category 30
+export VSPS_UA="vsbench-video-fetcher/0.1 (contact: <your email>)"   # Wikimedia asks for a contact
+python ~/videoseal-vs-pixelseal/scripts/fetch_videos.py --data $VSPS_DATA --source commons --per-category 30
+#    optional, better search relevance: free Pixabay key from https://pixabay.com/api/docs/
+#    export PIXABAY_API_KEY=... and use --source pixabay commons
 
 # 2. normalize, measure TI/SI, select 10 per tier (CPU job)
 cd ~/videoseal-vs-pixelseal && mkdir -p logs
 sbatch slurm/prepare.sbatch
 
-# 3. after it finishes, check the tiers, then run the 30 clips on GPUs
-column -s, -t < $VSPS_DATA/manifest.csv | cut -c1-120
+# 3. review $VSPS_DATA/candidates.html (thumbnail + TI per clip). Put the ids of
+#    off-topic clips in $VSPS_DATA/exclude.txt, one per line, and re-select:
+python scripts/select_videos.py --data $VSPS_DATA --per-tier 10
+#    then run the 30 clips on GPUs
 jid=$(sbatch --parsable slurm/run_array.sbatch)
 
 # 4. tables, plots and the video viewer once the array is done
@@ -129,7 +133,11 @@ The unit tests need ffmpeg but no models or GPU.
 
 ## Notes
 
-- Clips come from [Pexels](https://www.pexels.com/license/) (free to use). Authors and
-  page URLs are recorded in `raw/sources.csv` and copied into `manifest.csv`.
+- Clips come from [Wikimedia Commons](https://commons.wikimedia.org) (CC / public-domain;
+  the license of each file is recorded) and optionally [Pixabay](https://pixabay.com/service/license-summary/)
+  or [Pexels](https://www.pexels.com/license/). Pexels has paused new API keys. Authors,
+  page URLs and licenses are recorded in `raw/sources.csv` and copied into `manifest.csv`.
+- Commons search is title-based and noisy, which is why the review step exists. Long
+  videos are cut 20 % in (`prepare.py --start auto`) to skip intros and title cards.
 - SA-V is deliberately not used, because Video Seal was trained on it.
 - Video Seal is pinned to commit `f12875a` (see `slurm/setup_env.sh`).

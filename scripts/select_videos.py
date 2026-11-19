@@ -6,7 +6,8 @@
   mid  <- gathering    : the N gathering clips whose TI is closest to the midpoint between
                          the low and high tiers, preferring clips strictly between them
 
-Writes <data>/manifest.csv (one row per selected clip, with its array index for Slurm).
+Clip ids listed in <data>/exclude.txt (one per line) are skipped, so off-topic downloads
+spotted in candidates.html can be removed. Writes <data>/manifest.csv (one row per selected clip, with its array index for Slurm).
 
 Example:
     python scripts/select_videos.py --data $VSPS_DATA --per-tier 10
@@ -30,14 +31,23 @@ def main() -> int:
     ap.add_argument("--data", default=os.environ.get("VSPS_DATA", "data"))
     ap.add_argument("--per-tier", type=int, default=10)
     ap.add_argument("--metric", default="ti_mean", choices=["ti_mean", "ti"])
+    ap.add_argument("--exclude", default=None,
+                    help="file with clip ids to drop, one per line (default: <data>/exclude.txt if present)")
     a = ap.parse_args()
 
     data = Path(a.data)
-    with open(data / "candidates.csv", newline="") as f:
+    with open(data / "candidates.csv", newline="", encoding="utf-8") as f:
         cands = [dict(r, **{a.metric: float(r[a.metric])}) for r in csv.DictReader(f)]
+    excl_path = Path(a.exclude) if a.exclude else data / "exclude.txt"
+    if excl_path.exists():
+        excluded = {ln.strip() for ln in excl_path.read_text(encoding="utf-8").splitlines()
+                    if ln.strip() and not ln.startswith("#")}
+        before = len(cands)
+        cands = [r for r in cands if r["id"] not in excluded]
+        print(f"excluded {before - len(cands)} clips listed in {excl_path}")
     src_meta = {}
     if (data / SOURCES).exists():
-        with open(data / SOURCES, newline="") as f:
+        with open(data / SOURCES, newline="", encoding="utf-8") as f:
             for r in csv.DictReader(f):
                 src_meta[Path(r["file"]).stem] = r
 
@@ -71,7 +81,7 @@ def main() -> int:
             })
 
     out = data / "manifest.csv"
-    with open(out, "w", newline="") as f:
+    with open(out, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         w.writeheader()
         w.writerows(rows)

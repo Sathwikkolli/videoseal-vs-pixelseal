@@ -65,7 +65,7 @@ def main() -> int:
     ap.add_argument("--force", action="store_true", help="recompute even if the result JSON exists")
     a = ap.parse_args()
 
-    with open(a.manifest, newline="") as f:
+    with open(a.manifest, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     row = rows[a.index]
     vid, src = row["id"], Path(row["path"])
