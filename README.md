@@ -52,7 +52,7 @@ tests/                     model-free unit tests
 All paths default to `slurm/config.sh`:
 - account: `hafiz1`
 - data: `/scratch/hafiz1_root/hafiz1/$USER/vsps`
-- conda env: `vsps`
+- conda env: `/scratch/hafiz1_root/hafiz1/$USER/envs/vsps` (env and pip/conda/torch caches are kept on scratch, outside the 80 GB home quota)
 
 Override any of them with environment variables before running `sbatch`.
 
