@@ -6,6 +6,10 @@
   mid  <- gathering    : the N gathering clips whose TI is closest to the midpoint between
                          the low and high tiers, preferring clips strictly between them
 
+With --tiering ti the content labels are ignored: all clips are sorted by TI and cut into
+three equal thirds (or the N lowest / N around the geometric midpoint / N highest when there
+are more than 3N). Use it when the source labels do not track motion well.
+
 Clip ids listed in <data>/exclude.txt (one per line) are skipped, so off-topic downloads
 spotted in candidates.html can be removed. Writes <data>/manifest.csv (one row per selected clip, with its array index for Slurm).
 
@@ -31,6 +35,8 @@ def main() -> int:
     ap.add_argument("--data", default=os.environ.get("VSPS_DATA", "data"))
     ap.add_argument("--per-tier", type=int, default=10)
     ap.add_argument("--metric", default="ti_mean", choices=["ti_mean", "ti"])
+    ap.add_argument("--tiering", default="label", choices=["label", "ti"],
+                    help="label: tier from content category (default); ti: tier from measured TI only")
     ap.add_argument("--exclude", default=None,
                     help="file with clip ids to drop, one per line (default: <data>/exclude.txt if present)")
     a = ap.parse_args()
@@ -51,14 +57,36 @@ def main() -> int:
             for r in csv.DictReader(f):
                 src_meta[Path(r["file"]).stem] = r
 
+    m = a.metric
+    if a.tiering == "ti":
+        low, mid, high = split_by_ti(cands, m, a.per_tier)
+    else:
+        low, mid, high = select_by_label(cands, m, a.per_tier)
+    return write_manifest(data, src_meta, m, low, mid, high)
+
+
+def split_by_ti(cands: list[dict], m: str, n: int) -> tuple[list, list, list]:
+    rs = sorted(cands, key=lambda r: r[m])
+    if len(rs) <= 3 * n:
+        k = len(rs) // 3
+        extra = len(rs) - 3 * k  # give leftovers to the outer tiers
+        a, b = k + (extra > 0), len(rs) - k - (extra > 1)
+        return rs[:a], rs[a:b], rs[b:]
+    low, high = rs[:n], rs[-n:]
+    rest = rs[n:-n]
+    centre = math.sqrt(max(low[-1][m], 1e-3) * max(high[0][m], 1e-3))
+    mid = sorted(rest, key=lambda r: abs(math.log(max(r[m], 1e-3)) - math.log(centre)))[:n]
+    return low, mid, high
+
+
+def select_by_label(cands: list[dict], m: str, n: int) -> tuple[list, list, list]:
+    a_per_tier = n
     by_cat = {c: [r for r in cands if r["category"] == c] for c in TIER_OF}
     for c, rs in by_cat.items():
-        if len(rs) < a.per_tier:
-            print(f"WARNING: only {len(rs)} '{c}' candidates (need {a.per_tier}); fetch more", file=sys.stderr)
-
-    m = a.metric
-    low = sorted(by_cat["podcast"], key=lambda r: r[m])[: a.per_tier]
-    high = sorted(by_cat["high_motion"], key=lambda r: r[m], reverse=True)[: a.per_tier]
+        if len(rs) < a_per_tier:
+            print(f"WARNING: only {len(rs)} '{c}' candidates (need {a_per_tier}); fetch more", file=sys.stderr)
+    low = sorted(by_cat["podcast"], key=lambda r: r[m])[: a_per_tier]
+    high = sorted(by_cat["high_motion"], key=lambda r: r[m], reverse=True)[: a_per_tier]
     lo_max = max((r[m] for r in low), default=0.0)
     hi_min = min((r[m] for r in high), default=lo_max * 4 or 40.0)
     centre = math.sqrt(max(lo_max, 1e-3) * max(hi_min, 1e-3))  # geometric midpoint
@@ -66,8 +94,11 @@ def main() -> int:
     inside = [r for r in mids if lo_max < r[m] < hi_min]
     outside = [r for r in mids if not (lo_max < r[m] < hi_min)]
     key = lambda r: abs(math.log(max(r[m], 1e-3)) - math.log(centre))  # noqa: E731
-    mid = (sorted(inside, key=key) + sorted(outside, key=key))[: a.per_tier]
+    mid = (sorted(inside, key=key) + sorted(outside, key=key))[: a_per_tier]
+    return low, mid, high
 
+
+def write_manifest(data: Path, src_meta: dict, m: str, low: list, mid: list, high: list) -> int:
     rows = []
     for tier, sel in (("low", low), ("mid", mid), ("high", high)):
         for r in sorted(sel, key=lambda r: r[m]):

@@ -48,12 +48,16 @@ ATTACKS: dict[str, Attack] = {a.name: a for a in [
 DEFAULT_ATTACKS = list(ATTACKS)
 
 
-def apply_attack(src: str | Path, dst: str | Path, attack: Attack | str) -> Path:
+def apply_attack(src: str | Path, dst: str | Path, attack: Attack | str, seconds: float | None = None) -> Path:
+    """Apply `attack` to `src`. `seconds` limits the output to the first N seconds (saves time
+    when only those frames are decoded afterwards)."""
     if isinstance(attack, str):
         attack = ATTACKS[attack]
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
     args = ["-i", str(src)]
+    if seconds:
+        args += ["-t", f"{seconds}"]
     if attack.vf:
         args += ["-vf", attack.vf]
     if attack.crf is None:

@@ -131,6 +131,20 @@ python -m unittest discover -s tests -v
 
 The unit tests need ffmpeg but no models or GPU.
 
+### Full run on a laptop (no Slurm, CPU)
+
+```bash
+python scripts/prepare.py --data data --duration 5 --workers 2
+python scripts/select_videos.py --data data --per-tier 10
+bash scripts/run_local.sh data/manifest.csv data/out --device cpu --extract-seconds 3 \
+     --attacks compress_crf28 crop_area75 downscale_480p combined
+python scripts/aggregate.py --out data/out && python scripts/gallery.py --out data/out
+```
+
+This reduced setup uses 5 s clips, decodes from the first 3 s (as in the paper's Table 4) and
+runs one strength per attack family. On CPU it takes roughly 10-15 min per clip. CPU
+embedding times are not comparable with GPU numbers.
+
 ## Notes
 
 - Clips come from [Wikimedia Commons](https://commons.wikimedia.org) (CC / public-domain;

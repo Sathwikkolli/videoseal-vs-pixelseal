@@ -55,7 +55,15 @@ def summarize(df: pd.DataFrame, keys: list[str], cols: list[str]) -> pd.DataFram
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default=os.path.join(os.environ.get("VSPS_DATA", "data"), "out"))
+    ap.add_argument("--manifest", default=None,
+                    help="take each clip's tier from this manifest instead of the result JSON "
+                         "(use after re-tiering, e.g. select_videos.py --tiering ti)")
     a = ap.parse_args()
+    tier_of = {}
+    if a.manifest:
+        import csv
+        with open(a.manifest, newline="", encoding="utf-8") as f:
+            tier_of = {r["id"]: r["tier"] for r in csv.DictReader(f)}
 
     out = Path(a.out)
     files = sorted((out / "results").glob("*.json"))
@@ -65,7 +73,12 @@ def main() -> int:
     rob, qual = [], []
     for f in files:
         r = json.loads(f.read_text())
+        if tier_of:
+            if r["id"] not in tier_of:
+                continue
+            r["tier"] = tier_of[r["id"]]
         base = {k: r[k] for k in ("id", "tier", "ti_mean", "si_mean")}
+        base["category"] = r.get("category") or r["id"].split("__")[0]
         for model, m in r["models"].items():
             e = m["embed"]
             qual.append({**base, "model": model, **m["quality"],
@@ -96,6 +109,8 @@ def main() -> int:
     qual["vmaf"] = pd.to_numeric(qual["vmaf"], errors="coerce")
     qsum = summarize(qual, ["tier", "model"], qcols)
     rsum.to_csv(sdir / "robustness_summary.csv", index=False)
+    csum = summarize(rob, ["category", "attack", "model"], ["bit_acc"])
+    csum.to_csv(sdir / "robustness_by_category.csv", index=False)
     qsum.to_csv(sdir / "quality_summary.csv", index=False)
 
     # paired comparison on identical videos
@@ -150,6 +165,32 @@ def main() -> int:
         fig.savefig(sdir / "plots" / f"robustness_{tier}.png", dpi=150)
         plt.close(fig)
 
+    # motion as a continuous variable: does bit accuracy fall as TI rises? (label-free)
+    from scipy.stats import spearmanr
+    corr = []
+    for (model, atk), g in rob.groupby(["model", "attack"], observed=True):
+        if g["id"].nunique() >= 5 and g["bit_acc"].nunique() > 1:
+            rho, p = spearmanr(g["ti_mean"], g["bit_acc"])
+        else:
+            rho, p = float("nan"), float("nan")
+        corr.append({"model": model, "attack": atk, "n": g["id"].nunique(), "spearman_rho_ti_vs_bitacc": rho, "p": p})
+    corr = pd.DataFrame(corr)
+    corr.to_csv(sdir / "motion_correlation.csv", index=False)
+    atks = [a for a in attack_order if a in set(rob["attack"].astype(str))]
+    fig, axes = plt.subplots(1, len(atks), figsize=(3.2 * len(atks), 3.2), sharey=True, squeeze=False)
+    for ax, atk in zip(axes[0], atks):
+        for model in models:
+            g = rob[(rob["attack"] == atk) & (rob["model"] == model)]
+            ax.scatter(g["ti_mean"], g["bit_acc"], s=14, alpha=0.75, label=model)
+        ax.set_title(atk, fontsize=9)
+        ax.set_xlabel("TI (motion)")
+        ax.grid(alpha=0.3)
+    axes[0][0].set_ylabel("bit accuracy")
+    axes[0][-1].legend(fontsize=7)
+    fig.tight_layout()
+    fig.savefig(sdir / "plots" / "bitacc_vs_motion.png", dpi=150)
+    plt.close(fig)
+
     # markdown report
     lines = ["# Video Seal vs Pixel Seal\n", f"{rob['id'].nunique()} videos, device: {', '.join(qual['device'].unique())}\n",
              "## Quality and embedding time (mean per tier)\n"]
@@ -159,7 +200,11 @@ def main() -> int:
     rsum["cell"] = rsum.apply(lambda r: f"{r.bit_acc_mean:.3f} [{r.bit_acc_ci_lo:.3f}, {r.bit_acc_ci_hi:.3f}]", axis=1)
     piv = rsum.pivot_table(index=["tier", "attack"], columns="model", values="cell", aggfunc="first", observed=True)
     lines += [piv.reset_index().to_markdown(index=False), "\n## Paired Wilcoxon tests on bit accuracy\n",
-              tests.round(4).to_markdown(index=False) if not tests.empty else "(not enough data)", ""]
+              tests.round(4).to_markdown(index=False) if not tests.empty else "(not enough data)",
+              "\n## Motion vs bit accuracy (Spearman, all clips)\n", corr.round(4).to_markdown(index=False)]
+    csum["cell"] = csum.apply(lambda r: f"{r.bit_acc_mean:.3f} (n={r.n_videos})", axis=1)
+    cp = csum.pivot_table(index=["category", "attack"], columns="model", values="cell", aggfunc="first", observed=True)
+    lines += ["\n## Bit accuracy by content type (source label)\n", cp.reset_index().to_markdown(index=False), ""]
     (sdir / "report.md").write_text("\n".join(lines))
     print((sdir / "report.md").read_text())
     print(f"\nsummary written to {sdir}")

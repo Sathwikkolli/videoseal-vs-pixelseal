@@ -59,6 +59,8 @@ def main() -> int:
     ap.add_argument("--segment", type=int, default=32, help="frames per embed call (multiple of every k)")
     ap.add_argument("--ckpt-dir", default=os.environ.get("VSPS_CKPT", "ckpts"))
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--extract-seconds", type=float, default=None,
+                    help="decode the message from only the first N seconds (paper Table 4 uses 3); default all frames")
     ap.add_argument("--keep-attacked", action="store_true", help="keep attacked videos (large)")
     ap.add_argument("--no-viewer", action="store_true", help="skip previews / side-by-side / diff videos")
     ap.add_argument("--no-vmaf", action="store_true")
@@ -80,13 +82,14 @@ def main() -> int:
     work.mkdir(parents=True, exist_ok=True)
 
     info = probe(src)
+    max_frames = int(round(a.extract_seconds * info.fps)) if a.extract_seconds else None
     gpu = torch.cuda.get_device_name(0) if a.device.startswith("cuda") else platform.processor() or "cpu"
     log(f"{vid} tier={row['tier']} {info.width}x{info.height}@{info.fps:.0f} {info.nframes} frames on {gpu}")
     result = {
         "id": vid, "tier": row["tier"], "category": row.get("category"),
         "ti_mean": float(row["ti_mean"]), "si_mean": float(row["si_mean"]),
         "width": info.width, "height": info.height, "fps": info.fps, "nframes": info.nframes,
-        "device": gpu, "step_size": a.step_size, "models": {},
+        "device": gpu, "step_size": a.step_size, "extract_frames": max_frames or info.nframes, "models": {},
     }
     viewer = not a.no_viewer
     if viewer:
@@ -103,7 +106,7 @@ def main() -> int:
         mres: dict = {"card": spec.card, "step_size": spec.step_size, "nbits": nbits}
 
         # negative control: an unwatermarked clip should decode to ~50% bits, p ~ 1
-        dec, _ = extract_message(model, src, a.device)
+        dec, _ = extract_message(model, src, a.device, max_frames=max_frames)
         mres["unwatermarked"] = score_message(msg.numpy(), dec)
 
         mdir = vdir / spec.label
@@ -131,13 +134,13 @@ def main() -> int:
             make_preview(wm_path, mdir / "watermarked.mp4")
 
         attacks = {}
-        dec, ex = extract_message(model, wm_path, a.device)
+        dec, ex = extract_message(model, wm_path, a.device, max_frames=max_frames)
         attacks["none"] = {"family": "none", "strength": "-", **score_message(msg.numpy(), dec), **ex}
         for name in a.attacks:
             atk = ATTACKS[name]
             apath = work / f"{spec.label}_{name}.mp4"
-            apply_attack(wm_path, apath, atk)
-            dec, ex = extract_message(model, apath, a.device)
+            apply_attack(wm_path, apath, atk, seconds=a.extract_seconds)
+            dec, ex = extract_message(model, apath, a.device, max_frames=max_frames)
             attacks[name] = {"family": atk.family, "strength": atk.strength, **score_message(msg.numpy(), dec), **ex}
             log(f"   {name:16s} bit_acc={attacks[name]['bit_acc']:.3f} log10p={attacks[name]['log10_p']:.1f}")
             if a.keep_attacked:
